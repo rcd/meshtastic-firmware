@@ -1,11 +1,14 @@
 /*
-AES-256 Software Implementation
+AES-256 Software Implementation + T-table optimization
 
 based on https://github.com/kokke/tiny-AES-C/ which is in public domain
 
-NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
-        You should pad the end of the string with zeros if this is not the case.
-        For AES192/256 the key size is proportionally larger.
+Optimized for Cortex-M4 (nRF52840) using a single 1KB T-table (Te0). The barrel shifter provides
+free rotations via EOR Rd, Ra, Rb, ROR #n, so Te1/Te2/Te3 are derived at zero cost from Te0.
+
+T-table technique for Cortex-M3/M4:
+  P. Schwabe, K. Stoffelen, "All the AES You Need on Cortex-M3 and M4"
+  SAC 2016. https://eprint.iacr.org/2016/714
 */
 
 #include "tiny-aes.h"
@@ -14,8 +17,6 @@ NOTE:   String length must be evenly divisible by 16byte (str_len % 16 == 0)
 #define Nb 4
 #define Nk 8
 #define Nr 14
-
-typedef uint8_t state_t[4][4];
 
 static const uint8_t sbox[256] = {
     // 0     1    2      3     4    5     6     7      8    9     A      B    C     D     E     F
@@ -35,54 +36,64 @@ static const uint8_t sbox[256] = {
 
 static const uint8_t Rcon[11] = {0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36};
 
-#define getSBoxValue(num) (sbox[(num)])
+// Te0: combined SubBytes + MixColumns lookup table (1KB)
+// Each entry packs the MixColumns column vector [2·s, 1·s, 1·s, 3·s] in
+// little-endian order, where s = sbox[input_byte].
+// Sentinel: Te0[0x00] = 0xA56363C6
 
-static void KeyExpansion(uint8_t *RoundKey, const uint8_t *Key)
+static const uint32_t Te0[256] = {
+    0xA56363C6, 0x847C7CF8, 0x997777EE, 0x8D7B7BF6, 0x0DF2F2FF, 0xBD6B6BD6, 0xB16F6FDE, 0x54C5C591, 0x50303060, 0x03010102,
+    0xA96767CE, 0x7D2B2B56, 0x19FEFEE7, 0x62D7D7B5, 0xE6ABAB4D, 0x9A7676EC, 0x45CACA8F, 0x9D82821F, 0x40C9C989, 0x877D7DFA,
+    0x15FAFAEF, 0xEB5959B2, 0xC947478E, 0x0BF0F0FB, 0xECADAD41, 0x67D4D4B3, 0xFDA2A25F, 0xEAAFAF45, 0xBF9C9C23, 0xF7A4A453,
+    0x967272E4, 0x5BC0C09B, 0xC2B7B775, 0x1CFDFDE1, 0xAE93933D, 0x6A26264C, 0x5A36366C, 0x413F3F7E, 0x02F7F7F5, 0x4FCCCC83,
+    0x5C343468, 0xF4A5A551, 0x34E5E5D1, 0x08F1F1F9, 0x937171E2, 0x73D8D8AB, 0x53313162, 0x3F15152A, 0x0C040408, 0x52C7C795,
+    0x65232346, 0x5EC3C39D, 0x28181830, 0xA1969637, 0x0F05050A, 0xB59A9A2F, 0x0907070E, 0x36121224, 0x9B80801B, 0x3DE2E2DF,
+    0x26EBEBCD, 0x6927274E, 0xCDB2B27F, 0x9F7575EA, 0x1B090912, 0x9E83831D, 0x742C2C58, 0x2E1A1A34, 0x2D1B1B36, 0xB26E6EDC,
+    0xEE5A5AB4, 0xFBA0A05B, 0xF65252A4, 0x4D3B3B76, 0x61D6D6B7, 0xCEB3B37D, 0x7B292952, 0x3EE3E3DD, 0x712F2F5E, 0x97848413,
+    0xF55353A6, 0x68D1D1B9, 0x00000000, 0x2CEDEDC1, 0x60202040, 0x1FFCFCE3, 0xC8B1B179, 0xED5B5BB6, 0xBE6A6AD4, 0x46CBCB8D,
+    0xD9BEBE67, 0x4B393972, 0xDE4A4A94, 0xD44C4C98, 0xE85858B0, 0x4ACFCF85, 0x6BD0D0BB, 0x2AEFEFC5, 0xE5AAAA4F, 0x16FBFBED,
+    0xC5434386, 0xD74D4D9A, 0x55333366, 0x94858511, 0xCF45458A, 0x10F9F9E9, 0x06020204, 0x817F7FFE, 0xF05050A0, 0x443C3C78,
+    0xBA9F9F25, 0xE3A8A84B, 0xF35151A2, 0xFEA3A35D, 0xC0404080, 0x8A8F8F05, 0xAD92923F, 0xBC9D9D21, 0x48383870, 0x04F5F5F1,
+    0xDFBCBC63, 0xC1B6B677, 0x75DADAAF, 0x63212142, 0x30101020, 0x1AFFFFE5, 0x0EF3F3FD, 0x6DD2D2BF, 0x4CCDCD81, 0x140C0C18,
+    0x35131326, 0x2FECECC3, 0xE15F5FBE, 0xA2979735, 0xCC444488, 0x3917172E, 0x57C4C493, 0xF2A7A755, 0x827E7EFC, 0x473D3D7A,
+    0xAC6464C8, 0xE75D5DBA, 0x2B191932, 0x957373E6, 0xA06060C0, 0x98818119, 0xD14F4F9E, 0x7FDCDCA3, 0x66222244, 0x7E2A2A54,
+    0xAB90903B, 0x8388880B, 0xCA46468C, 0x29EEEEC7, 0xD3B8B86B, 0x3C141428, 0x79DEDEA7, 0xE25E5EBC, 0x1D0B0B16, 0x76DBDBAD,
+    0x3BE0E0DB, 0x56323264, 0x4E3A3A74, 0x1E0A0A14, 0xDB494992, 0x0A06060C, 0x6C242448, 0xE45C5CB8, 0x5DC2C29F, 0x6ED3D3BD,
+    0xEFACAC43, 0xA66262C4, 0xA8919139, 0xA4959531, 0x37E4E4D3, 0x8B7979F2, 0x32E7E7D5, 0x43C8C88B, 0x5937376E, 0xB76D6DDA,
+    0x8C8D8D01, 0x64D5D5B1, 0xD24E4E9C, 0xE0A9A949, 0xB46C6CD8, 0xFA5656AC, 0x07F4F4F3, 0x25EAEACF, 0xAF6565CA, 0x8E7A7AF4,
+    0xE9AEAE47, 0x18080810, 0xD5BABA6F, 0x887878F0, 0x6F25254A, 0x722E2E5C, 0x241C1C38, 0xF1A6A657, 0xC7B4B473, 0x51C6C697,
+    0x23E8E8CB, 0x7CDDDDA1, 0x9C7474E8, 0x211F1F3E, 0xDD4B4B96, 0xDCBDBD61, 0x868B8B0D, 0x858A8A0F, 0x907070E0, 0x423E3E7C,
+    0xC4B5B571, 0xAA6666CC, 0xD8484890, 0x05030306, 0x01F6F6F7, 0x120E0E1C, 0xA36161C2, 0x5F35356A, 0xF95757AE, 0xD0B9B969,
+    0x91868617, 0x58C1C199, 0x271D1D3A, 0xB99E9E27, 0x38E1E1D9, 0x13F8F8EB, 0xB398982B, 0x33111122, 0xBB6969D2, 0x70D9D9A9,
+    0x898E8E07, 0xA7949433, 0xB69B9B2D, 0x221E1E3C, 0x92878715, 0x20E9E9C9, 0x49CECE87, 0xFF5555AA, 0x78282850, 0x7ADFDFA5,
+    0x8F8C8C03, 0xF8A1A159, 0x80898909, 0x170D0D1A, 0xDABFBF65, 0x31E6E6D7, 0xC6424284, 0xB86868D0, 0xC3414182, 0xB0999929,
+    0x772D2D5A, 0x110F0F1E, 0xCBB0B07B, 0xFC5454A8, 0xD6BBBB6D, 0x3A16162C};
+
+static inline uint32_t rotr(uint32_t x, unsigned n)
 {
-    uint8_t tempa[4];
+    return (x >> n) | (x << (32 - n));
+}
 
-    for (unsigned i = 0; i < Nk; ++i) {
-        RoundKey[(i * 4) + 0] = Key[(i * 4) + 0];
-        RoundKey[(i * 4) + 1] = Key[(i * 4) + 1];
-        RoundKey[(i * 4) + 2] = Key[(i * 4) + 2];
-        RoundKey[(i * 4) + 3] = Key[(i * 4) + 3];
+static uint32_t SubWord(uint32_t w)
+{
+    return (uint32_t)sbox[w & 0xff] | ((uint32_t)sbox[(w >> 8) & 0xff] << 8) | ((uint32_t)sbox[(w >> 16) & 0xff] << 16) |
+           ((uint32_t)sbox[w >> 24] << 24);
+}
+
+static void KeyExpansion(uint32_t *rk, const uint8_t *Key)
+{
+    for (unsigned i = 0; i < Nk; i++) {
+        memcpy(&rk[i], &Key[i * 4], 4);
     }
 
-    for (unsigned i = Nk; i < Nb * (Nr + 1); ++i) {
-        unsigned k = (i - 1) * 4;
-        tempa[0] = RoundKey[k + 0];
-        tempa[1] = RoundKey[k + 1];
-        tempa[2] = RoundKey[k + 2];
-        tempa[3] = RoundKey[k + 3];
-
+    for (unsigned i = Nk; i < Nb * (Nr + 1); i++) {
+        uint32_t temp = rk[i - 1];
         if (i % Nk == 0) {
-            const uint8_t u8tmp = tempa[0];
-            tempa[0] = tempa[1];
-            tempa[1] = tempa[2];
-            tempa[2] = tempa[3];
-            tempa[3] = u8tmp;
-
-            tempa[0] = getSBoxValue(tempa[0]);
-            tempa[1] = getSBoxValue(tempa[1]);
-            tempa[2] = getSBoxValue(tempa[2]);
-            tempa[3] = getSBoxValue(tempa[3]);
-
-            tempa[0] = tempa[0] ^ Rcon[i / Nk];
+            temp = SubWord(rotr(temp, 8)) ^ (uint32_t)Rcon[i / Nk];
+        } else if (i % Nk == 4) {
+            temp = SubWord(temp);
         }
-
-        if (i % Nk == 4) {
-            tempa[0] = getSBoxValue(tempa[0]);
-            tempa[1] = getSBoxValue(tempa[1]);
-            tempa[2] = getSBoxValue(tempa[2]);
-            tempa[3] = getSBoxValue(tempa[3]);
-        }
-
-        unsigned j = i * 4;
-        k = (i - Nk) * 4;
-        RoundKey[j + 0] = RoundKey[k + 0] ^ tempa[0];
-        RoundKey[j + 1] = RoundKey[k + 1] ^ tempa[1];
-        RoundKey[j + 2] = RoundKey[k + 2] ^ tempa[2];
-        RoundKey[j + 3] = RoundKey[k + 3] ^ tempa[3];
+        rk[i] = rk[i - Nk] ^ temp;
     }
 }
 
@@ -100,117 +111,92 @@ void AES_ctx_set_iv(struct AES_ctx *ctx, const uint8_t *iv)
     memcpy(ctx->Iv, iv, AES_BLOCKLEN);
 }
 
-static void AddRoundKey(uint8_t round, state_t *state, const uint8_t *RoundKey)
+// T-table Cipher -------------------------------------------------------------
+// Rounds 1–13: 16 Te0 lookups + rotations + XOR per round.
+// Round 14 (final): direct S-box lookups (no MixColumns).
+
+static void Cipher(const uint32_t *in, uint32_t *out, const uint32_t *rk)
 {
-    for (uint8_t i = 0; i < 4; ++i) {
-        for (uint8_t j = 0; j < 4; ++j) {
-            (*state)[i][j] ^= RoundKey[(round * Nb * 4) + (i * Nb) + j];
-        }
+    uint32_t s0 = in[0] ^ rk[0];
+    uint32_t s1 = in[1] ^ rk[1];
+    uint32_t s2 = in[2] ^ rk[2];
+    uint32_t s3 = in[3] ^ rk[3];
+    uint32_t t0, t1, t2, t3;
+
+    // Each lookup combines SubBytes + ShiftRows + MixColumns for one byte.
+    // Byte extraction encodes ShiftRows: row 0 (& 0xff) stays, row 1 (>> 8)
+    // shifts +1 column, row 2 (>> 16) +2, row 3 (>> 24) +3.
+    // rotr amounts select the Te sub-table: Te0=0, Te1=rotr 24, Te2=rotr 16, Te3=rotr 8.
+    const uint32_t *rkr = rk + 4;
+    for (int round = 1; round < Nr; round++, rkr += 4) {
+        t0 =
+            Te0[s0 & 0xff] ^ rotr(Te0[(s1 >> 8) & 0xff], 24) ^ rotr(Te0[(s2 >> 16) & 0xff], 16) ^ rotr(Te0[s3 >> 24], 8) ^ rkr[0];
+        t1 =
+            Te0[s1 & 0xff] ^ rotr(Te0[(s2 >> 8) & 0xff], 24) ^ rotr(Te0[(s3 >> 16) & 0xff], 16) ^ rotr(Te0[s0 >> 24], 8) ^ rkr[1];
+        t2 =
+            Te0[s2 & 0xff] ^ rotr(Te0[(s3 >> 8) & 0xff], 24) ^ rotr(Te0[(s0 >> 16) & 0xff], 16) ^ rotr(Te0[s1 >> 24], 8) ^ rkr[2];
+        t3 =
+            Te0[s3 & 0xff] ^ rotr(Te0[(s0 >> 8) & 0xff], 24) ^ rotr(Te0[(s1 >> 16) & 0xff], 16) ^ rotr(Te0[s2 >> 24], 8) ^ rkr[3];
+        s0 = t0;
+        s1 = t1;
+        s2 = t2;
+        s3 = t3;
     }
-}
 
-static void SubBytes(state_t *state)
-{
-    for (uint8_t i = 0; i < 4; ++i) {
-        for (uint8_t j = 0; j < 4; ++j) {
-            (*state)[j][i] = getSBoxValue((*state)[j][i]);
-        }
-    }
-}
-
-static void ShiftRows(state_t *state)
-{
-    uint8_t temp = (*state)[0][1];
-    (*state)[0][1] = (*state)[1][1];
-    (*state)[1][1] = (*state)[2][1];
-    (*state)[2][1] = (*state)[3][1];
-    (*state)[3][1] = temp;
-
-    temp = (*state)[0][2];
-    (*state)[0][2] = (*state)[2][2];
-    (*state)[2][2] = temp;
-
-    temp = (*state)[1][2];
-    (*state)[1][2] = (*state)[3][2];
-    (*state)[3][2] = temp;
-
-    temp = (*state)[0][3];
-    (*state)[0][3] = (*state)[3][3];
-    (*state)[3][3] = (*state)[2][3];
-    (*state)[2][3] = (*state)[1][3];
-    (*state)[1][3] = temp;
-}
-
-static uint8_t xtime(uint8_t x)
-{
-    return ((x << 1) ^ (((x >> 7) & 1) * 0x1b));
-}
-
-static void MixColumns(state_t *state)
-{
-    for (uint8_t i = 0; i < 4; ++i) {
-        uint8_t t = (*state)[i][0];
-        uint8_t Tmp = (*state)[i][0] ^ (*state)[i][1] ^ (*state)[i][2] ^ (*state)[i][3];
-        uint8_t Tm = (*state)[i][0] ^ (*state)[i][1];
-        Tm = xtime(Tm);
-        (*state)[i][0] ^= Tm ^ Tmp;
-        Tm = (*state)[i][1] ^ (*state)[i][2];
-        Tm = xtime(Tm);
-        (*state)[i][1] ^= Tm ^ Tmp;
-        Tm = (*state)[i][2] ^ (*state)[i][3];
-        Tm = xtime(Tm);
-        (*state)[i][2] ^= Tm ^ Tmp;
-        Tm = (*state)[i][3] ^ t;
-        Tm = xtime(Tm);
-        (*state)[i][3] ^= Tm ^ Tmp;
-    }
-}
-
-#define Multiply(x, y)                                                                                                           \
-    (((y & 1) * x) ^ ((y >> 1 & 1) * xtime(x)) ^ ((y >> 2 & 1) * xtime(xtime(x))) ^ ((y >> 3 & 1) * xtime(xtime(xtime(x)))) ^    \
-     ((y >> 4 & 1) * xtime(xtime(xtime(xtime(x))))))
-
-static void Cipher(state_t *state, const uint8_t *RoundKey)
-{
-    uint8_t round = 0;
-
-    AddRoundKey(0, state, RoundKey);
-
-    for (round = 1;; ++round) {
-        SubBytes(state);
-        ShiftRows(state);
-        if (round == Nr) {
-            break;
-        }
-        MixColumns(state);
-        AddRoundKey(round, state, RoundKey);
-    }
-    AddRoundKey(Nr, state, RoundKey);
+    // Final round: SubBytes + ShiftRows + AddRoundKey (no MixColumns)
+    out[0] = ((uint32_t)sbox[s0 & 0xff] | ((uint32_t)sbox[(s1 >> 8) & 0xff] << 8) | ((uint32_t)sbox[(s2 >> 16) & 0xff] << 16) |
+              ((uint32_t)sbox[s3 >> 24] << 24)) ^
+             rkr[0];
+    out[1] = ((uint32_t)sbox[s1 & 0xff] | ((uint32_t)sbox[(s2 >> 8) & 0xff] << 8) | ((uint32_t)sbox[(s3 >> 16) & 0xff] << 16) |
+              ((uint32_t)sbox[s0 >> 24] << 24)) ^
+             rkr[1];
+    out[2] = ((uint32_t)sbox[s2 & 0xff] | ((uint32_t)sbox[(s3 >> 8) & 0xff] << 8) | ((uint32_t)sbox[(s0 >> 16) & 0xff] << 16) |
+              ((uint32_t)sbox[s1 >> 24] << 24)) ^
+             rkr[2];
+    out[3] = ((uint32_t)sbox[s3 & 0xff] | ((uint32_t)sbox[(s0 >> 8) & 0xff] << 8) | ((uint32_t)sbox[(s1 >> 16) & 0xff] << 16) |
+              ((uint32_t)sbox[s2 >> 24] << 24)) ^
+             rkr[3];
 }
 
 void AES_CTR_xcrypt_buffer(struct AES_ctx *ctx, uint8_t *buf, size_t length)
 {
-    uint8_t buffer[AES_BLOCKLEN];
+    uint32_t iv[4], ks[4];
 
-    size_t i;
-    int bi;
-    for (i = 0, bi = AES_BLOCKLEN; i < length; ++i, ++bi) {
-        if (bi == AES_BLOCKLEN) {
+    while (length >= AES_BLOCKLEN) {
+        memcpy(iv, ctx->Iv, AES_BLOCKLEN);
+        Cipher(iv, ks, ctx->RoundKey);
 
-            memcpy(buffer, ctx->Iv, AES_BLOCKLEN);
-            Cipher((state_t *)buffer, ctx->RoundKey);
-
-            for (bi = (AES_BLOCKLEN - 1); bi >= 0; --bi) {
-                if (ctx->Iv[bi] == 255) {
-                    ctx->Iv[bi] = 0;
-                    continue;
-                }
-                ctx->Iv[bi] += 1;
+        // Big-endian counter increment (MSB at byte 0, LSB at byte 15)
+        for (int bi = AES_BLOCKLEN - 1; bi >= 0; --bi) {
+            if (++ctx->Iv[bi] != 0)
                 break;
-            }
-            bi = 0;
         }
 
-        buf[i] = (buf[i] ^ buffer[bi]);
+        // XOR keystream 4 bytes at a time. memcpy avoids strict-aliasing
+        // violations on the uint8_t *buf; compiles to single LDR/STR on ARM.
+        for (int i = 0; i < 4; i++) {
+            uint32_t b;
+            memcpy(&b, buf + i * 4, 4);
+            b ^= ks[i];
+            memcpy(buf + i * 4, &b, 4);
+        }
+
+        buf += AES_BLOCKLEN;
+        length -= AES_BLOCKLEN;
+    }
+
+    if (length > 0) {
+        memcpy(iv, ctx->Iv, AES_BLOCKLEN);
+        Cipher(iv, ks, ctx->RoundKey);
+
+        for (int bi = AES_BLOCKLEN - 1; bi >= 0; --bi) {
+            if (++ctx->Iv[bi] != 0)
+                break;
+        }
+
+        const uint8_t *ksp = (const uint8_t *)ks;
+        for (size_t i = 0; i < length; ++i) {
+            buf[i] ^= ksp[i];
+        }
     }
 }

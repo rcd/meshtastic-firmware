@@ -5,11 +5,9 @@
 #include <stdint.h>
 
 #define AES_BLOCKLEN 16 // Block length in bytes - AES is 128b block only
-// #define AES_KEYLEN 32
-#define AES_keyExpSize 240
 
 struct AES_ctx {
-    uint8_t RoundKey[AES_keyExpSize];
+    uint32_t RoundKey[60]; // Nb * (Nr + 1) = 4 * 15 = 60 words for AES-256
     uint8_t Iv[AES_BLOCKLEN];
 };
 
