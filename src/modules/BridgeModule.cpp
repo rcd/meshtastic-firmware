@@ -243,6 +243,10 @@ ProcessMessage BridgeModule::handleReceived(const meshtastic_MeshPacket &mp)
     if (loopRing.contains(mp.from, mp.id))
         return ProcessMessage::CONTINUE;
 
+    // Don't re-bridge packets that arrived via a bridge
+    if (mp.transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_BRIDGE)
+        return ProcessMessage::CONTINUE;
+
     // This packet arrived via local RF; clear the bridge flag for its sender
     meshtastic_NodeInfoLite *srcNode = nodeDB->getMeshNode(mp.from);
     if (srcNode)
@@ -427,8 +431,7 @@ void BridgeModule::processReceivedFrame(const uint8_t *payload, uint16_t len)
     if (p->channel != 0)
         p->channel = channels.getHash(0);
 
-    // TODO: No TRANSPORT_BRIDGE enum exists yet. Once added to mesh.proto, set it here
-    // and check it in handleReceived() to prevent re-bridging and unintended MQTT forwarding.
+    p->transport_mechanism = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_BRIDGE;
 
     LOG_INFO("Bridge: injecting packet from link (from=0x%08x id=0x%08x hop_start=%u ch=0x%x)", p->from, p->id, p->hop_start,
              p->channel);

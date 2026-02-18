@@ -741,6 +741,8 @@ void MQTT::onSend(const meshtastic_MeshPacket &mp_encrypted, const meshtastic_Me
 {
     if (mp_encrypted.via_mqtt)
         return; // Don't send messages that came from MQTT back into MQTT
+    if (mp_encrypted.transport_mechanism == meshtastic_MeshPacket_TransportMechanism_TRANSPORT_BRIDGE)
+        return; // Don't send bridge-received packets into MQTT on this node
     bool uplinkEnabled = false;
     for (int i = 0; i <= 7; i++) {
         if (channels.getByIndex(i).settings.uplink_enabled)
