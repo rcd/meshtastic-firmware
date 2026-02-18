@@ -4,6 +4,7 @@
 
 #include "BridgeModule.h"
 #include "mesh/Channels.h"
+#include "mesh/NodeDB.h"
 #include "mesh/Throttle.h"
 #include "mesh/mesh-pb-constants.h"
 #include "MeshService.h"
@@ -242,6 +243,20 @@ ProcessMessage BridgeModule::handleReceived(const meshtastic_MeshPacket &mp)
     if (loopRing.contains(mp.from, mp.id))
         return ProcessMessage::CONTINUE;
 
+    // This packet arrived via local RF; clear the bridge flag for its sender
+    meshtastic_NodeInfoLite *srcNode = nodeDB->getMeshNode(mp.from);
+    if (srcNode)
+        srcNode->bitfield &= ~NODEINFO_BITFIELD_VIA_BRIDGE_MASK;
+
+    // Skip unicast packets whose destination is reachable locally
+    if (!isBroadcast(mp.to)) {
+        meshtastic_NodeInfoLite *destNode = nodeDB->getMeshNode(mp.to);
+        if (destNode && !(destNode->bitfield & NODEINFO_BITFIELD_VIA_BRIDGE_MASK)) {
+            LOG_DEBUG("Bridge: skip unicast to local node 0x%08x", mp.to);
+            return ProcessMessage::CONTINUE;
+        }
+    }
+
     // Access the encrypted copy of this packet from the router
     if (!router || !router->p_encrypted)
         return ProcessMessage::CONTINUE;
@@ -392,6 +407,11 @@ void BridgeModule::processReceivedFrame(const uint8_t *payload, uint16_t len)
 
     // Record in loop prevention ring so we don't echo this back to the link
     loopRing.record(p->from, p->id);
+
+    // Mark the sender as a bridge-side node (if already in NodeDB)
+    meshtastic_NodeInfoLite *srcNode = nodeDB->getMeshNode(p->from);
+    if (srcNode)
+        srcNode->bitfield |= NODEINFO_BITFIELD_VIA_BRIDGE_MASK;
 
     // Give fresh hop budget for local mesh
     p->hop_limit = p->hop_start;

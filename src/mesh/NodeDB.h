@@ -380,6 +380,8 @@ extern uint32_t error_address;
 #define NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_MASK (1 << NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_SHIFT)
 #define NODEINFO_BITFIELD_IS_MUTED_SHIFT 1
 #define NODEINFO_BITFIELD_IS_MUTED_MASK (1 << NODEINFO_BITFIELD_IS_MUTED_SHIFT)
+#define NODEINFO_BITFIELD_VIA_BRIDGE_SHIFT 2
+#define NODEINFO_BITFIELD_VIA_BRIDGE_MASK (1 << NODEINFO_BITFIELD_VIA_BRIDGE_SHIFT)
 
 #define Module_Config_size                                                                                                       \
     (ModuleConfig_CannedMessageConfig_size + ModuleConfig_ExternalNotificationConfig_size + ModuleConfig_MQTTConfig_size +       \
