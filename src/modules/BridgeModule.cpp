@@ -4,6 +4,8 @@
 
 #include "BridgeModule.h"
 #include "mesh/Channels.h"
+#include "mesh/Throttle.h"
+#include "mesh/mesh-pb-constants.h"
 #include "MeshService.h"
 #include "mesh/MeshTypes.h"
 #include "mesh/Router.h"
@@ -219,7 +221,8 @@ bool BridgeModule::shouldFilter(const meshtastic_MeshPacket &mp) const
     if (mp.decoded.portnum == meshtastic_PortNum_ROUTING_APP)
         return true;
 
-    if (!moduleConfig.bridge.bridge_admin && mp.decoded.portnum == meshtastic_PortNum_ADMIN_APP)
+    if (moduleConfig.bridge.blocked_portnums_count > 0 &&
+        is_in_repeated(moduleConfig.bridge.blocked_portnums, (uint32_t)mp.decoded.portnum))
         return true;
 
     return false;
@@ -272,6 +275,7 @@ void BridgeModule::sendToLink(const meshtastic_MeshPacket &mp)
     link->writeBytes(payload, payloadLen);
     link->writeBytes(trailer, sizeof(trailer));
     link->endWrite();
+    lastActivityTime = millis();
 
     LOG_DEBUG("Bridge: sent %u bytes to link (from=0x%08x id=0x%08x)", payloadLen, mp.from, mp.id);
 }
@@ -280,7 +284,7 @@ void BridgeModule::sendToLink(const meshtastic_MeshPacket &mp)
 int32_t BridgeModule::runOnce()
 {
     if (!link || !link->isInitialized())
-        return BRIDGE_POLL_INTERVAL_MS;
+        return 1000;
 
     // Reset parser if a partial frame has stalled
     if (rxState != WAIT_START && lastByteTime != 0 && (millis() - lastByteTime > frameTimeoutMs)) {
@@ -289,15 +293,24 @@ int32_t BridgeModule::runOnce()
     }
 
     // Read available bytes and feed to state machine parser
+    bool hadBytes = false;
     while (link->available() > 0) {
         uint8_t b;
         if (link->readBytes(&b, 1) == 1) {
             lastByteTime = millis();
             parseByte(b);
+            hadBytes = true;
         }
     }
 
-    return BRIDGE_POLL_INTERVAL_MS;
+    // Adaptive polling: fast when active, back off when idle
+    if (hadBytes) {
+        lastActivityTime = millis();
+        return 0;
+    }
+    if (Throttle::isWithinTimespanMs(lastActivityTime, 2000))
+        return 5;
+    return 250;
 }
 
 void BridgeModule::parseByte(uint8_t b)

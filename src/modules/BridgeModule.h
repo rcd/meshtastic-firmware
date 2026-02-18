@@ -12,7 +12,6 @@
 #define BRIDGE_FRAME_START 0xBD       // Frame delimiter byte for the bridge wire protocol
 #define BRIDGE_MAX_PAYLOAD 400        // Max encoded MeshPacket size per frame (bytes)
 #define BRIDGE_LOOP_RING_SIZE 64      // Number of (from, id) pairs tracked for loop prevention
-#define BRIDGE_POLL_INTERVAL_MS 5     // UART polling interval in the runOnce() loop (ms)
 #define BRIDGE_DEFAULT_BAUD 115200    // Recommended minimum baud rate for reliable operation
 #define BRIDGE_MIN_BAUD 9600          // Lowest baud rate that can handle all LoRa presets
 
@@ -94,6 +93,7 @@ class BridgeModule : public MeshModule, private concurrency::OSThread
     uint8_t rxCrcHi = 0;
     uint32_t lastByteTime = 0;
     uint32_t frameTimeoutMs = 100;
+    uint32_t lastActivityTime = 0;
 
     void sendToLink(const meshtastic_MeshPacket &mp);
     void processReceivedFrame(const uint8_t *payload, uint16_t len);
