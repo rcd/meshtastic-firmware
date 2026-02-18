@@ -96,6 +96,9 @@
 #if !MESHTASTIC_EXCLUDE_STATUS
 #include "modules/StatusMessageModule.h"
 #endif
+#if !MESHTASTIC_EXCLUDE_BRIDGE
+#include "modules/BridgeModule.h"
+#endif
 
 #if defined(HAS_HARDWARE_WATCHDOG)
 #include "watchdog/watchdogThread.h"
@@ -158,6 +161,23 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_STATUS
     statusMessageModule = new StatusMessageModule();
+#endif
+#if !MESHTASTIC_EXCLUDE_BRIDGE
+    // HARDCODED FOR TESTING — remove before merge
+    moduleConfig.has_bridge = true;
+    moduleConfig.bridge.enabled = true;
+    moduleConfig.bridge.link_type = meshtastic_ModuleConfig_BridgeConfig_BridgeLinkType_LINK_UART;
+    moduleConfig.bridge.rxd = 15;  // PIN_SERIAL1_RX (P0.15)
+    moduleConfig.bridge.txd = 16;  // PIN_SERIAL1_TX (P0.16)
+    moduleConfig.bridge.de_pin = 0;
+    moduleConfig.bridge.baud = meshtastic_ModuleConfig_SerialConfig_Serial_Baud_BAUD_115200;
+    // RAK5802 uses TP8485E with auto-direction — WB_IO2 is just the 3V3_S power enable
+    pinMode(34, OUTPUT);
+    digitalWrite(34, HIGH);
+
+    if (moduleConfig.has_bridge && moduleConfig.bridge.enabled) {
+        bridgeModule = new BridgeModule();
+    }
 #endif
 #if !MESHTASTIC_EXCLUDE_GENERIC_THREAD_MODULE
     new GenericThreadModule();

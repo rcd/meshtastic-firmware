@@ -35,4 +35,6 @@ bool isOneOf(int item, int count, ...);
 
 const std::string vformat(const char *const zcFormat, ...);
 
+uint16_t crc16Ccitt(const uint8_t *data, size_t len, uint16_t init = 0xFFFF);
+
 #define IS_ONE_OF(item, ...) isOneOf(item, sizeof((int[]){__VA_ARGS__}) / sizeof(int), __VA_ARGS__)
