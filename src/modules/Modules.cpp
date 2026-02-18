@@ -171,10 +171,6 @@ void setupModules()
     moduleConfig.bridge.txd = 16;  // PIN_SERIAL1_TX (P0.16)
     moduleConfig.bridge.de_pin = 0;
     moduleConfig.bridge.baud = meshtastic_ModuleConfig_SerialConfig_Serial_Baud_BAUD_115200;
-    // RAK5802 uses TP8485E with auto-direction — WB_IO2 is just the 3V3_S power enable
-    pinMode(34, OUTPUT);
-    digitalWrite(34, HIGH);
-
     if (moduleConfig.has_bridge && moduleConfig.bridge.enabled) {
         bridgeModule = new BridgeModule();
     }
