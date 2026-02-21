@@ -1001,6 +1001,11 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
         moduleConfig.statusmessage = c.payload_variant.statusmessage;
         shouldReboot = false;
         break;
+    case meshtastic_ModuleConfig_bridge_tag:
+        LOG_INFO("Set module config: Bridge");
+        moduleConfig.has_bridge = true;
+        moduleConfig.bridge = c.payload_variant.bridge;
+        break;
     }
     saveChanges(SEGMENT_MODULECONFIG, shouldReboot);
     return true;
@@ -1185,6 +1190,11 @@ void AdminModule::handleGetModuleConfig(const meshtastic_MeshPacket &req, const 
             LOG_INFO("Get module config: StatusMessage");
             res.get_module_config_response.which_payload_variant = meshtastic_ModuleConfig_statusmessage_tag;
             res.get_module_config_response.payload_variant.statusmessage = moduleConfig.statusmessage;
+            break;
+        case meshtastic_AdminMessage_ModuleConfigType_BRIDGE_CONFIG:
+            LOG_INFO("Get module config: Bridge");
+            res.get_module_config_response.which_payload_variant = meshtastic_ModuleConfig_bridge_tag;
+            res.get_module_config_response.payload_variant.bridge = moduleConfig.bridge;
             break;
         }
 

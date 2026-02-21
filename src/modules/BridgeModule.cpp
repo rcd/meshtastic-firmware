@@ -2,6 +2,18 @@
 
 #if !MESHTASTIC_EXCLUDE_BRIDGE
 
+/*
+ * BridgeModule -- connects two separate LoRa meshes over a wired UART/RS485 link.
+ *
+ * Outbound (RF -> link): handleReceived() captures encrypted packets from the local mesh
+ * via router->p_encrypted and frames them over the wire. Only channel 0 packets are bridged.
+ *
+ * Inbound (link -> RF): runOnce() polls the UART, parseByte() reassembles frames, and
+ * processReceivedFrame() injects them into the local mesh via router->enqueueReceivedMessage().
+ *
+ * Limitations:
+ * - Only channel 0 is bridged; secondary channel packets will fail decryption on the remote mesh.
+ */
 #include "BridgeModule.h"
 #include "mesh/Channels.h"
 #include "mesh/NodeDB.h"
@@ -29,7 +41,7 @@ void PacketIdRing::record(uint32_t from, uint32_t id)
 bool PacketIdRing::contains(uint32_t from, uint32_t id) const
 {
     concurrency::LockGuard g(&lock);
-    for (uint8_t i = 0; i < count; i++) {
+    for (uint16_t i = 0; i < count; i++) {
         if (entries[i].from == from && entries[i].id == id)
             return true;
     }
@@ -93,8 +105,10 @@ int UartBridgeLink::readBytes(uint8_t *buf, int maxLen)
 
 void UartBridgeLink::beginWrite()
 {
-    if (dePin)
+    if (dePin) {
         digitalWrite(dePin, HIGH);
+        delayMicroseconds(10); // RS485 transceiver setup time before first data bit
+    }
 }
 
 void UartBridgeLink::endWrite()
@@ -174,9 +188,9 @@ BridgeModule::BridgeModule()
         baud = BRIDGE_MIN_BAUD;
     }
 
-    // 3 character times (10 bits each) in ms, minimum 100ms
-    uint32_t charTimeoutMs = 30000 / baud;
-    frameTimeoutMs = (charTimeoutMs > 100) ? charTimeoutMs : 100;
+    // Inter-byte timeout for partial frame detection. 100ms is generous enough
+    // for all supported baud rates (3 character times at 9600 = 3ms).
+    frameTimeoutMs = 100;
 
     auto linkType = moduleConfig.bridge.link_type;
     if (linkType == meshtastic_ModuleConfig_BridgeConfig_BridgeLinkType_LINK_RS485 ||
@@ -194,8 +208,12 @@ BridgeModule::BridgeModule()
             return;
         }
 
-        if (moduleConfig.has_serial && moduleConfig.serial.enabled) {
-            LOG_WARN("BridgeModule: SerialModule is also enabled — ensure they use different UARTs");
+        if (moduleConfig.has_serial && moduleConfig.serial.enabled &&
+            moduleConfig.serial.rxd && moduleConfig.serial.txd) {
+            if (moduleConfig.serial.rxd == rxPin || moduleConfig.serial.txd == txPin) {
+                LOG_ERROR("BridgeModule: pin conflict with SerialModule (rxd=%u txd=%u), refusing to init", rxPin, txPin);
+                return;
+            }
         }
 
         link = new UartBridgeLink(rxPin, txPin, dePin, baud);
@@ -206,7 +224,19 @@ BridgeModule::BridgeModule()
         }
     }
 
-    LOG_INFO("BridgeModule initialized");
+    if (link && link->isInitialized()) {
+        LOG_INFO("BridgeModule initialized");
+        // Bridge remaps all channel hashes to channel 0. Packets on secondary channels
+        // will arrive with the wrong hash and fail decryption on the remote mesh.
+        for (uint8_t i = 1; i < MAX_NUM_CHANNELS; i++) {
+            if (channels.getByIndex(i).role == meshtastic_Channel_Role_SECONDARY) {
+                LOG_WARN("BridgeModule: secondary channels are active but only channel 0 is bridged");
+                break;
+            }
+        }
+    } else {
+        LOG_ERROR("BridgeModule failed to initialize");
+    }
 }
 
 BridgeModule::~BridgeModule()
@@ -261,7 +291,9 @@ ProcessMessage BridgeModule::handleReceived(const meshtastic_MeshPacket &mp)
         }
     }
 
-    // Access the encrypted copy of this packet from the router
+    // Access the encrypted copy of this packet from the router.
+    // Note: p_encrypted is set during callModules() and is safe here in the synchronous
+    // callback context (same pattern as MQTT). Not thread-safe for async access.
     if (!router || !router->p_encrypted)
         return ProcessMessage::CONTINUE;
 
@@ -290,10 +322,15 @@ void BridgeModule::sendToLink(const meshtastic_MeshPacket &mp)
     uint8_t trailer[2] = {(uint8_t)(crc >> 8), (uint8_t)(crc & 0xFF)};
 
     link->beginWrite();
-    link->writeBytes(header, sizeof(header));
-    link->writeBytes(payload, payloadLen);
-    link->writeBytes(trailer, sizeof(trailer));
+    size_t written = 0;
+    written += link->writeBytes(header, sizeof(header));
+    written += link->writeBytes(payload, payloadLen);
+    written += link->writeBytes(trailer, sizeof(trailer));
     link->endWrite();
+
+    size_t expected = sizeof(header) + payloadLen + sizeof(trailer);
+    if (written != expected)
+        LOG_WARN("Bridge: partial write (%u/%u bytes), frame may be corrupt", (unsigned)written, (unsigned)expected);
     lastActivityTime = millis();
 
     LOG_DEBUG("Bridge: sent %u bytes to link (from=0x%08x id=0x%08x)", payloadLen, mp.from, mp.id);
@@ -383,6 +420,17 @@ void BridgeModule::parseByte(uint8_t b)
 
 void BridgeModule::processReceivedFrame(const uint8_t *payload, uint16_t len)
 {
+    // Rate limit packets from the link to prevent airtime flooding via UART injection
+    uint32_t now = millis();
+    if (now - rxWindowStart >= 1000) {
+        rxWindowStart = now;
+        rxWindowCount = 0;
+    }
+    if (++rxWindowCount > BRIDGE_MAX_RX_PER_SEC) {
+        LOG_WARN("Bridge: rate limit exceeded (%u pkt/s), dropping frame", BRIDGE_MAX_RX_PER_SEC);
+        return;
+    }
+
     meshtastic_MeshPacket *p = packetPool.allocZeroed();
     if (!p) {
         LOG_WARN("Bridge: failed to allocate MeshPacket");
@@ -420,7 +468,8 @@ void BridgeModule::processReceivedFrame(const uint8_t *payload, uint16_t len)
     // Give fresh hop budget for local mesh
     p->hop_limit = p->hop_start;
 
-    // Clear routing hints — let local mesh routing decide
+    // Clear routing hints from the remote mesh so NextHopRouter doesn't try to use
+    // stale relay_node/next_hop values that have no meaning in the local mesh.
     p->relay_node = 0;
     p->next_hop = 0;
 

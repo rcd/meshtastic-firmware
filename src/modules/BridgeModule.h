@@ -11,9 +11,17 @@
 
 #define BRIDGE_FRAME_START 0xBD       // Frame delimiter byte for the bridge wire protocol
 #define BRIDGE_MAX_PAYLOAD 400        // Max encoded MeshPacket size per frame (bytes)
-#define BRIDGE_LOOP_RING_SIZE 64      // Number of (from, id) pairs tracked for loop prevention
+// Number of (from, id) pairs tracked for loop prevention. Sized to cover multi-hop RF echo
+// latency (~6s at max throughput). Cost: 256 * 8 = 2KB. If traffic exceeds ring capacity,
+// evicted entries may cause echo loops -- but this is unlikely under normal mesh load.
+#define BRIDGE_LOOP_RING_SIZE 256
 #define BRIDGE_DEFAULT_BAUD 115200    // Recommended minimum baud rate for reliable operation
 #define BRIDGE_MIN_BAUD 9600          // Lowest baud rate that can handle all LoRa presets
+#define BRIDGE_MAX_RX_PER_SEC 20      // Max packets accepted from link per second (rate limit)
+
+// Security: The wire protocol provides CRC16 error detection but no authentication,
+// encryption of metadata, or replay protection. Physical link access is assumed trusted.
+// Inbound packets are rate-limited to mitigate airtime flooding from UART injection.
 
 // Abstract base class for bridge transport links.
 class BridgeLink
@@ -50,7 +58,7 @@ class UartBridgeLink : public BridgeLink
     bool initialized = false;
 };
 
-// Circular buffer for loop prevention — tracks (from, id) pairs of packets received from link
+// Circular buffer for loop prevention -- tracks (from, id) pairs of packets received from link
 struct PacketIdEntry {
     uint32_t from;
     uint32_t id;
@@ -64,8 +72,8 @@ class PacketIdRing
 
   private:
     PacketIdEntry entries[BRIDGE_LOOP_RING_SIZE] = {};
-    uint8_t head = 0;
-    uint8_t count = 0;
+    uint16_t head = 0;
+    uint16_t count = 0;
     mutable concurrency::Lock lock;
 };
 
@@ -77,6 +85,7 @@ class BridgeModule : public MeshModule, private concurrency::OSThread
 
   protected:
     virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
+    // Combined with isPromiscuous and encryptedOk, this ensures the bridge sees every packet
     virtual bool wantPacket(const meshtastic_MeshPacket *p) override { return true; }
     virtual int32_t runOnce() override;
 
@@ -94,6 +103,10 @@ class BridgeModule : public MeshModule, private concurrency::OSThread
     uint32_t lastByteTime = 0;
     uint32_t frameTimeoutMs = 100;
     uint32_t lastActivityTime = 0;
+
+    // Rate limiter for packets received from the link
+    uint32_t rxWindowStart = 0;
+    uint16_t rxWindowCount = 0;
 
     void sendToLink(const meshtastic_MeshPacket &mp);
     void processReceivedFrame(const uint8_t *payload, uint16_t len);
